@@ -27,24 +27,38 @@ final class Database implements AutoCloseable {
             try (var result = statement.executeQuery("PRAGMA user_version")) {
                 version = result.getInt(1);
             }
-            if (version > 2) {
+            if (version > 4) {
                 throw new SQLException("Unsupported database version: " + version);
             }
-            if (version < 2) {
+            if (version < 4) {
+                // Rebuild mutually referencing tables in one transaction, then validate before committing.
+                statement.execute("PRAGMA foreign_keys = OFF");
                 connection.setAutoCommit(false);
                 try {
                     if (version == 0) {
                         runScript(statement, schema);
                         migrate(statement, "/boards.sql");
                     }
-                    migrate(statement, "/page_versions.sql");
-                    statement.execute("PRAGMA user_version=2");
+                    if (version < 2) {
+                        migrate(statement, "/page_versions.sql");
+                    }
+                    if (version < 3) {
+                        migrate(statement, "/deck_delete.sql");
+                    }
+                    migrate(statement, "/library_jobs.sql");
+                    try (var violations = statement.executeQuery("PRAGMA foreign_key_check")) {
+                        if (violations.next()) {
+                            throw new SQLException("Migration produced invalid foreign keys in " + violations.getString(1));
+                        }
+                    }
+                    statement.execute("PRAGMA user_version=4");
                     connection.commit();
                 } catch (SQLException | IOException failure) {
                     connection.rollback();
                     throw failure;
                 } finally {
                     connection.setAutoCommit(true);
+                    statement.execute("PRAGMA foreign_keys = ON");
                 }
             }
         }

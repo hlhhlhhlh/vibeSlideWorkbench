@@ -54,14 +54,16 @@ $env:RIGHTAPI_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'RightAPI
 | --- | --- | --- |
 | 添加页面 | `POST /decks/{deck}/slides`，传 `{}`；可传 `after` 指定插入位置 | 用返回的页面 ID 关联数据，按页序显示页码 |
 | 读取演示稿 | `GET /decks/{deck}` | 用 `slide_id` 筛选本页的 `nodes`、`jobs`、`boards`。图片按 ID 升序返回，可逆序展示。每页可有多个 `parent_id: null` 的版本 |
-| 保存页面要求 | `POST /slides/{slide}/board`，传当前 `board`、`page_type`、`required_text`、`content`、`local_style` | 返回要求快照 ID。内容相同时返回原 ID。旧图、已采用的图片和已提交的任务都会保留 |
+| 保存页面要求 | `POST /slides/{slide}/requirements`，传当前 `revision`、`page_type`、`required_text`、`content`、`local_style` | 返回 `id` 和 `revision`，值为本页要求版本号。内容相同时版本号不变。旧 `/board` 路径和 `board` 参数仍可使用 |
 | 生成新方案 | `POST /slides/{slide}/generate`，如 `{"board":8}` | 返回任务 ID。可传补充说明 `instruction`。使用当前页面要求和项目风格调用生图接口 |
 | 修改图片 | 同一接口，如 `{"board":8,"parent":12,"instruction":"保留排版，把年份改为 2026"}` | 返回任务 ID。`parent` 可选本页任意图片。编辑接口接收该图和修改指令。省略或留空指令时，后端比较来源图与当前的页面要求；没有差异会返回 400。显式填写的指令按原文使用 |
 | 上传图片 | `POST /slides/{slide}/upload`，请求体为图片字节，可传 `X-Board-Id` | 返回图片节点 ID。上传图也加入本页的候选版本 |
 | 采用图片 | `POST /slides/{slide}/select`，如 `{"node":12}` | 仅在用户点「采用」时调用。预览状态由前端维护，导出读取每页的 `selected_node_id` |
 | 重试失败任务 | `POST /slides/{slide}/retry`，如 `{"job":21}` | 用原来的要求快照、父图和提示词提交新任务 |
 
-`slides[].board_id` 表示当前页面要求。`nodes[].board_id` 和 `jobs[].board_id` 表示生成、编辑或上传时记录的要求快照，可在 `boards` 中按 ID 查找。提交生成或编辑时建议传当前 `board`；如果已经被更新，接口返回 409，刷新后可重新提交。同页旧图仍可作为 `parent`。
+页面要求直接保存在 `slides`，`requirements_revision` 是本页内递增的版本号。新接口通过 `revision` 检查版本，上传时可用 `X-Requirements-Revision`。版本不符返回 409。同页旧图仍可作为 `parent`。每个 Job 的 `requirements_snapshot_json` 固定当时的要求和项目风格，`image_size` 固定输出尺寸。上传和素材拖入的节点独立保存要求快照，支持之后比较要求变化。
+
+现有前端继续使用 `/board`、`board` 和 `X-Board-Id`。响应中的 `slides[].board_id` 是版本号的兼容别名，`boards` 数组提供当前各页要求；历史快照从 Job 或上传节点读取。`nodes[].generation_job_id`、`nodes[].parent_id` 和 `jobs[].parent_node_id` 也保留为兼容字段，实际表字段分别为 `job_id` 和 `source_node_id`。
 
 首次出图和上传也需要显式采用。若有页面尚未采用图片，导出返回 409。导出任务创建后固定当时的页序和图片，之后换图不影响这次导出。
 
@@ -74,9 +76,9 @@ $env:RIGHTAPI_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'RightAPI
 | `decks` | 一套演示稿包含多页和多次导出 |
 | `slides` | 管理页序和当前选图，删除页面时保留历史 |
 | `assets` | 保存文件名、格式、尺寸和校验值 |
-| `boards` | 保存底板及其所属页面，每页最多一块活动底板 |
-| `image_nodes` | 记录所属页面、要求快照和可选的来源图 |
-| `generation_jobs` | 固定父节点和本次指令，记录排队、执行、成功、失败 |
+| `library_items` | 保存素材名称和标签，引用去重后的文件 |
+| `image_nodes` | 记录所属页面、文件、可选的来源素材和来源 Job；一个 Job 最多有一张结果图 |
+| `generation_jobs` | 固定源图、页面要求快照、提示词、模型、尺寸和单价，记录执行状态和估算费用 |
 | `exports` | 记录 PPTX 或 PDF 的导出任务 |
 | `export_items` | 按导出页序保存当时选中的节点 |
 
@@ -84,4 +86,39 @@ $env:RIGHTAPI_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'RightAPI
 
 应用供本机单用户使用。备份时先停止应用，再复制整个数据目录。
 
-启动时自动升级至数据库版本 2。旧页面、图片、采用记录和导出明细沿用原 ID，以往停用底板上的图片也会出现在该页的历史版本中。
+启动时自动升级至数据库版本 4，合并页面要求并移除 `boards` 表。旧页面、图片、采用记录和导出明细沿用原 ID，历史 Job 和上传节点保留原页面要求。旧库没有记录的历史项目风格、尺寸和付费任务价格保留为未知，旧排队任务继续按执行时配置的尺寸处理。迁移在事务中完成，并在提交前检查所有外键。
+
+## 素材库后端接口
+
+以下路径均以 `/api` 为前缀，写请求沿用 `X-SlideBranch: 1`。前端可在现有编辑器中接入这些接口。
+
+| 操作 | 请求 | 响应 / 行为 |
+| --- | --- | --- |
+| 上传素材 | `POST /library/upload?name=Logo&tag=brand&tag=logo`，请求体为 PNG/JPEG 原始字节 | 201，`{"id":...}`。名称可省略，默认“未命名素材”；标签可重复传 `tag`。中文参数需 URL 编码。最大 20 MB |
+| 列表和筛选 | `GET /library?q=Logo&tag=brand` | `{"items":[...]}`，按名称包含关系和标签精确匹配筛选，两个条件同时生效 |
+| 素材详情 | `GET /library/{item}` | 返回名称、`tags` 字符串数组、图片尺寸和 `usage_count` |
+| 素材图片 | `GET /library/{item}/image` | 返回原始图片，可作为缩略图或预览来源 |
+| 编辑名称、标签 | `PATCH /library/{item}`，如 `{"name":"公司 Logo","tags":["品牌","Logo"]}` | 返回更新后的详情，允许只提供一个字段；每个素材最多 20 个标签，每个标签最多 40 字符，重复标签自动去重 |
+| 移除素材 | `DELETE /library/{item}` | 软删除素材条目，已有页面图片继续引用原文件 |
+| 拖入页面 | `POST /slides/{slide}/library`，如 `{"item":3,"revision":2}` | 201，返回新增图片节点 ID。`revision` 可省略；已有选中图由用户显式采用后切换 |
+
+`usage_count` 按该素材的图片节点数计算。同一页拖两次记两次，删页或删除演示稿后对应节点不计数，恢复页面后重新计入。拖入操作共享文件，基于该图改图才创建 Job，新结果不会增加素材拖入次数。
+
+## Job 与费用
+
+`GET /api/jobs/{job}` 返回任务详情，包括要求快照、`source_node_id`、`retry_of_job_id`、`provider_task_id`、单价和估算费用。RightAPI 返回异步任务号时立即保存，失败或本地超时后仍可用于核对。
+
+价格按用户提供的按次报价配置，以整数美分存储，币种为 USD。
+
+| 模型 | `unit_price_cents` |
+| --- | --- |
+| `gpt-image-2` | 10 |
+| `gpt-image-2.5-flare`、`gpt-image-2.5-sunburst` | 20 |
+| `gpt-image-2.6-flare`、`gpt-image-2.6-sunburst` | 20 |
+| 本地演示模式 | 0 |
+
+每次提交时固定模型、尺寸和单价。成功后 `estimated_cost_cents` 等于单价，`billing_status` 为 `estimated`。已定价付费任务排队、执行中或失败时为 `pending`，金额留空；未配置价格的模型和旧付费任务为 `unknown`。本地演示任务始终记 0。费用属于估算，失败和超时调用的实际收费需要供应商确认。重试沿用原要求快照、源图和提示词，新建 Job，并按重试时选择的模型和价格记录。
+
+`GET /api/decks/{deck}/costs` 返回 `currency`、`estimated_cost_cents`、`job_count`、`pending_job_count` 和 `unknown_job_count`，演示稿详情也包含同样的 `costs` 字段。累计费用包含已删除页面的 Job，删除演示稿后仍可读取其费用汇总。若调用期间删页，已完成的生成结果和费用仍会保存。
+
+完整字段和关系见 [数据库设计](docs/database-design.md)。

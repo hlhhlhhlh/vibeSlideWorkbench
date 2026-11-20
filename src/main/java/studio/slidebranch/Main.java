@@ -9,12 +9,16 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -128,7 +132,7 @@ public final class Main {
         }
         if (path.equals("/api/decks")) {
             if (method.equals("GET")) {
-                json(exchange, 200, Map.of("decks", studio.db.rows("SELECT * FROM decks ORDER BY id DESC"),
+                json(exchange, 200, Map.of("decks", studio.decks(),
                         "provider", studio.images.provider(), "model", studio.images.model()));
                 return;
             }
@@ -137,6 +141,23 @@ public final class Main {
                 created(exchange, studio.db.insert("INSERT INTO decks(title) VALUES(?)", title));
                 return;
             }
+        }
+        if (method.equals("GET") && path.equals("/api/library")) {
+            var parameters = queryParameters(exchange);
+            String query = queryValue(parameters, "q", "");
+            String tag = queryValue(parameters, "tag", "");
+            if (query.length() > 100 || tag.length() > 40) {
+                throw new Problem(400, "筛选条件过长。");
+            }
+            json(exchange, 200, Map.of("items", studio.library(query, tag)));
+            return;
+        }
+        if (method.equals("POST") && path.equals("/api/library/upload")) {
+            var parameters = queryParameters(exchange);
+            String name = queryValue(parameters, "name", "未命名素材");
+            var tags = parameters.getOrDefault("tag", List.of());
+            created(exchange, studio.uploadLibrary(read(exchange, Images.MAX_BYTES), name, tags));
+            return;
         }
         String[] parts = path.split("/");
         if (parts.length < 4 || parts.length > 5 || !parts[1].equals("api")) {
@@ -148,9 +169,47 @@ public final class Main {
         if (parts.length == 5) {
             action = parts[4];
         }
+        if (resource.equals("library")) {
+            if (method.equals("GET") && action.equals("image")) {
+                var asset = studio.libraryAsset(id);
+                file(exchange, studio.assets.resolve((String) asset.get("storage_key")), (String) asset.get("mime_type"));
+                return;
+            }
+            if (action.isEmpty()) {
+                if (method.equals("GET")) {
+                    json(exchange, 200, studio.libraryItem(id));
+                    return;
+                }
+                if (method.equals("PATCH")) {
+                    var data = body(exchange);
+                    String name = null;
+                    List<String> tags = null;
+                    if (data.has("name")) {
+                        name = field(data, "name", 100);
+                    }
+                    if (data.has("tags")) {
+                        tags = tags(data);
+                    }
+                    studio.updateLibrary(id, name, tags);
+                    json(exchange, 200, studio.libraryItem(id));
+                    return;
+                }
+                if (method.equals("DELETE")) {
+                    studio.deleteLibrary(id);
+                    json(exchange, 200, Map.of("ok", true));
+                    return;
+                }
+            }
+            throw new Problem(404, "地址不存在。");
+        }
+        if (method.equals("GET") && resource.equals("decks") && action.equals("costs")) {
+            json(exchange, 200, studio.costs(id));
+            return;
+        }
         if (method.equals("GET") && action.isEmpty()) {
             switch (resource) {
                 case "decks" -> json(exchange, 200, studio.deck(id));
+                case "jobs" -> json(exchange, 200, studio.job(id));
                 case "nodes" -> {
                     var asset = studio.nodeAsset(id);
                     exchange.getResponseHeaders().set("Cache-Control", "private, max-age=31536000, immutable");
@@ -168,6 +227,11 @@ public final class Main {
                 }
                 default -> throw new Problem(404, "地址不存在。");
             }
+            return;
+        }
+        if (method.equals("DELETE") && resource.equals("decks") && action.isEmpty()) {
+            studio.deleteDeck(id);
+            json(exchange, 200, Map.of("ok", true));
             return;
         }
         if (method.equals("POST") && resource.equals("decks")) {
@@ -209,12 +273,18 @@ public final class Main {
 
     private void slideAction(HttpExchange exchange, long id, String action) throws Exception {
         if (action.equals("upload")) {
-            String header = exchange.getRequestHeaders().getFirst("X-Board-Id");
-            Long board = null;
-            if (header != null) {
-                board = Long.valueOf(header);
+            String header = exchange.getRequestHeaders().getFirst("X-Requirements-Revision");
+            if (header == null) {
+                header = exchange.getRequestHeaders().getFirst("X-Board-Id");
             }
-            created(exchange, studio.upload(id, board, read(exchange, Images.MAX_BYTES)));
+            Long revision = null;
+            if (header != null) {
+                if (!header.matches("[1-9][0-9]*")) {
+                    throw new Problem(400, "页面要求版本无效。");
+                }
+                revision = Long.valueOf(header);
+            }
+            created(exchange, studio.upload(id, revision, read(exchange, Images.MAX_BYTES)));
             return;
         }
         JsonObject data = body(exchange);
@@ -224,17 +294,32 @@ public final class Main {
                 if (data.has("instruction")) {
                     instruction = optionalText(data, "instruction");
                 }
-                created(exchange, studio.enqueue(id, optionalId(data, "board"), optionalId(data, "parent"), instruction));
+                created(exchange, studio.enqueue(id, expectedRevision(data), optionalId(data, "parent"), instruction));
             }
             case "retry" -> created(exchange, studio.retry(id, optionalId(data,"job")));
-            case "board" -> created(exchange, studio.saveBoard(id, optionalId(data,"board"), field(data,"page_type",20),
-                    optionalText(data,"required_text"),optionalText(data,"content"),optionalText(data,"local_style")));
+            case "board", "requirements" -> {
+                long revision = studio.saveRequirements(id, expectedRevision(data), field(data, "page_type", 20),
+                        optionalText(data, "required_text"), optionalText(data, "content"), optionalText(data, "local_style"));
+                json(exchange, 201, Map.of("id", revision, "revision", revision));
+            }
+            case "library" -> {
+                Long item = optionalId(data, "item");
+                if (item == null) {
+                    throw new Problem(400, "请选择素材。");
+                }
+                created(exchange, studio.useLibrary(id, item, expectedRevision(data)));
+            }
             case "restore" -> {
                 studio.restore(id);
                 json(exchange,200,Map.of("ok",true));
             }
             case "move" -> {
-                studio.move(id, field(data, "direction", 10));
+                Long position = optionalId(data, "position");
+                if (position != null) {
+                    studio.moveTo(id, position);
+                } else {
+                    studio.move(id, field(data, "direction", 10));
+                }
                 json(exchange, 200, Map.of("ok", true));
             }
             case "select" -> {
@@ -254,6 +339,61 @@ public final class Main {
             }
             default -> throw new Problem(404, "地址不存在。");
         }
+    }
+
+    private static Long expectedRevision(JsonObject data) {
+        Long revision = optionalId(data, "revision");
+        Long board = optionalId(data, "board");
+        if (revision != null && board != null && !revision.equals(board)) {
+            throw new Problem(400, "页面要求版本不一致。");
+        }
+        if (revision != null) {
+            return revision;
+        }
+        return board;
+    }
+
+    private static List<String> tags(JsonObject data) {
+        if (!data.get("tags").isJsonArray()) {
+            throw new Problem(400, "标签须为字符串列表。");
+        }
+        var result = new ArrayList<String>();
+        for (var tag : data.getAsJsonArray("tags")) {
+            if (!tag.isJsonPrimitive() || !tag.getAsJsonPrimitive().isString()) {
+                throw new Problem(400, "标签须为字符串列表。");
+            }
+            result.add(tag.getAsString());
+        }
+        return result;
+    }
+
+    private static Map<String, List<String>> queryParameters(HttpExchange exchange) {
+        var result = new LinkedHashMap<String, List<String>>();
+        String query = exchange.getRequestURI().getRawQuery();
+        if (query == null) {
+            return result;
+        }
+        if (query.length() > 8192) {
+            throw new Problem(400, "查询参数过长。");
+        }
+        for (String parameter : query.split("&")) {
+            String[] pair = parameter.split("=", 2);
+            String name = URLDecoder.decode(pair[0], StandardCharsets.UTF_8);
+            String value = "";
+            if (pair.length == 2) {
+                value = URLDecoder.decode(pair[1], StandardCharsets.UTF_8);
+            }
+            result.computeIfAbsent(name, key -> new ArrayList<>()).add(value);
+        }
+        return result;
+    }
+
+    private static String queryValue(Map<String, List<String>> parameters, String name, String fallback) {
+        var values = parameters.get(name);
+        if (values == null) {
+            return fallback;
+        }
+        return values.getFirst().strip();
     }
 
     private static Long optionalId(JsonObject data, String field) {

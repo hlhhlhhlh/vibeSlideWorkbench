@@ -22,6 +22,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.UUID;
+import java.util.function.Consumer;
 import javax.imageio.ImageIO;
 
 final class Images {
@@ -57,9 +58,14 @@ final class Images {
         return configuredModel;
     }
 
-    byte[] generate(String provider, String model, Path parent, String instruction, long jobId) throws Exception {
+    String size() {
+        return size;
+    }
+
+    byte[] generate(String provider, String model, String size, Path parent, String instruction, long jobId,
+                    Consumer<String> taskSubmitted) throws Exception {
         if (provider.equals("rightapi")) {
-            return rightApi.generate(model, size, instruction, parent);
+            return rightApi.generate(model, size, instruction, parent, taskSubmitted);
         }
         if (provider.equals("demo")) {
             return demo(parent, instruction, jobId);

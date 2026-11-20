@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Set;
+import java.util.function.Consumer;
 
 final class RightApi {
     private final HttpClient client;
@@ -29,7 +30,7 @@ final class RightApi {
         return !key.isEmpty();
     }
 
-    byte[] generate(String model, String size, String prompt, Path parent) throws Exception {
+    byte[] generate(String model, String size, String prompt, Path parent, Consumer<String> taskSubmitted) throws Exception {
         if (!configured()) {
             throw new IOException("请配置 RIGHTAPI_KEY 后重试。");
         }
@@ -58,6 +59,13 @@ final class RightApi {
         String taskId = "";
         long deadline = System.nanoTime() + Duration.ofMinutes(10).toNanos();
         while (true) {
+            if (taskId.isEmpty() && result.has("task_id") && result.get("task_id").isJsonPrimitive()) {
+                taskId = result.get("task_id").getAsString();
+                if (!taskId.matches("[A-Za-z0-9_-]{1,200}")) {
+                    throw new IOException("RightAPI 未返回有效的任务编号。");
+                }
+                taskSubmitted.accept(taskId);
+            }
             String status = "";
             if (result.has("status") && result.get("status").isJsonPrimitive()) {
                 status = result.get("status").getAsString();
@@ -73,10 +81,7 @@ final class RightApi {
                 return download(items.get(0).getAsJsonObject().get("url").getAsString());
             }
             if (taskId.isEmpty()) {
-                if (!result.has("task_id") || !result.get("task_id").getAsString().matches("[A-Za-z0-9_-]{1,200}")) {
-                    throw new IOException("RightAPI 未返回有效的任务编号。" + message(result));
-                }
-                taskId = result.get("task_id").getAsString();
+                throw new IOException("RightAPI 未返回有效的任务编号。" + message(result));
             }
             if (System.nanoTime() >= deadline) {
                 throw new IOException("等待 RightAPI 结果超时，任务编号 " + taskId);

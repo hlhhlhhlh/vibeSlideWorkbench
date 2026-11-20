@@ -13,24 +13,48 @@
 </head>
 <body>
     <header class="topbar">
-        <div class="brand">
+        <a href="#/" id="home-link" class="brand" title="返回首页">
             <span class="brand-mark" aria-hidden="true" data-icon="branch"></span>
             <span class="brand-name">SlideBranch</span>
+        </a>
+        <span class="topbar-divider deck-only" aria-hidden="true"></span>
+        <a href="#/" class="ghost-link deck-only" title="返回首页"><span data-icon="home"></span><span class="label">首页</span></a>
+        <div class="deck-nav deck-only">
+            <span class="deck-nav-icon" aria-hidden="true" data-icon="deck"></span>
+            <span id="deck-title" class="deck-title"></span>
         </div>
-        <span class="topbar-divider" aria-hidden="true"></span>
-        <div class="deck-picker">
-            <span class="deck-picker-icon" aria-hidden="true" data-icon="deck"></span>
-            <select id="deck-list" aria-label="选择演示稿"></select>
-        </div>
-        <button id="create-deck" class="ghost" title="新建演示稿"><span data-icon="plus"></span><span class="label">新建</span></button>
-        <button id="style-button" class="ghost" disabled title="项目风格"><span data-icon="palette"></span><span class="label">项目风格</span></button>
+        <button id="style-button" class="ghost deck-only" disabled title="项目风格"><span data-icon="palette"></span><span class="label">项目风格</span></button>
+        <button id="library-button" class="ghost deck-only" disabled title="素材库" aria-pressed="false" aria-controls="library"><span data-icon="image"></span><span class="label">素材库</span></button>
         <span class="topbar-spacer"></span>
+        <span id="deck-cost" class="deck-cost deck-only"></span>
         <span id="mode" class="mode"></span>
         <button id="settings-button" class="ghost" type="button" aria-label="本机设置" title="本机设置"><span data-icon="settings"></span><span class="label">设置</span></button>
         <button id="theme-button" class="ghost theme-button" type="button"><span data-icon="theme"></span><span id="theme-label" class="label"></span></button>
-        <button id="exports-button" class="primary" disabled><span data-icon="download"></span><span class="label">导出</span></button>
+        <button id="exports-button" class="primary deck-only" disabled><span data-icon="download"></span><span class="label">导出</span></button>
     </header>
-    <main id="workspace" class="workspace">
+    <main id="home" class="home" hidden>
+        <div class="home-inner">
+            <div class="home-head">
+                <h1>演示稿工作台</h1>
+                <p class="muted">每页一张整图。写下文字生成图片，再用一句话修改。</p>
+            </div>
+            <div class="home-actions">
+                <button id="home-new" type="button" class="home-action accent">
+                    <span class="home-action-icon" data-icon="plus"></span>
+                    <span class="home-action-text"><strong>新增项目</strong><small>从空白演示稿开始</small></span>
+                </button>
+                <button id="home-settings" type="button" class="home-action">
+                    <span class="home-action-icon" data-icon="settings"></span>
+                    <span class="home-action-text"><strong>设置</strong><small>密钥、绘图模型和图片尺寸</small></span>
+                </button>
+            </div>
+            <div class="panel-header home-section">
+                <h2>历史项目 <span id="deck-count" class="count"></span></h2>
+            </div>
+            <div id="deck-grid" class="deck-grid"></div>
+        </div>
+    </main>
+    <main id="workspace" class="workspace" hidden>
         <aside class="sidebar" aria-label="页面列表">
             <div class="panel-header">
                 <h2>页面 <span id="slide-count" class="count"></span></h2>
@@ -38,6 +62,35 @@
             </div>
             <div id="slides" class="slides"></div>
             <button id="trash-button" class="trash-button ghost" disabled><span data-icon="trash"></span><span id="trash-label">回收站</span></button>
+        </aside>
+        <aside id="library" class="library" aria-label="素材库" hidden>
+            <div class="panel-header">
+                <h2>素材库 <span id="library-count" class="count"></span></h2>
+                <span class="library-head-actions">
+                    <button id="library-add" class="ghost" type="button"><span data-icon="upload"></span><span>上传</span></button>
+                    <button id="library-close" class="icon" type="button" aria-label="关闭素材库" title="关闭素材库"><span data-icon="close"></span></button>
+                </span>
+            </div>
+            <input id="library-input" type="file" accept="image/png,image/jpeg" hidden>
+            <form id="library-upload" class="library-upload" hidden>
+                <p id="library-file" class="muted"></p>
+                <div class="field">
+                    <label for="library-name">名称</label>
+                    <input id="library-name" maxlength="100" required>
+                </div>
+                <div class="field">
+                    <label for="library-tags">标签</label>
+                    <input id="library-tags" maxlength="900" placeholder="用逗号分隔，例如：品牌, Logo">
+                </div>
+                <div class="dialog-actions">
+                    <button type="button" id="library-cancel" class="ghost">取消</button>
+                    <button type="submit" class="primary">上传素材</button>
+                </div>
+            </form>
+            <input id="library-search" type="search" maxlength="100" placeholder="按名称搜索" aria-label="按名称搜索素材">
+            <div id="library-filter" class="tag-filter" aria-label="按标签筛选"></div>
+            <p class="muted library-hint">把素材拖到左侧某一页，加入该页的候选图。</p>
+            <div id="library-list" class="library-list"></div>
         </aside>
         <section class="stage" aria-label="当前页面">
             <div class="stage-inner">
