@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SlideBranch · 演示稿工作台</title>
+    <link rel="stylesheet" href="/app.css">
+    <script src="/app.js" defer></script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand"><span class="brand-mark" aria-hidden="true">↳</span> SlideBranch</div>
+        <select id="deck-list" aria-label="选择演示稿"></select>
+        <button id="create-deck" class="subtle">＋ 新建演示稿</button>
+        <button id="style-button" class="subtle" disabled>项目风格</button>
+        <span id="mode" class="mode"></span>
+        <button id="exports-button" class="primary" disabled>导出</button>
+    </header>
+    <main id="workspace" class="workspace">
+        <aside class="sidebar" aria-label="页面列表">
+            <div class="section-header">
+                <h2>页面</h2>
+                <button id="add-slide" class="icon" aria-label="添加页面" title="添加页面" disabled>＋</button>
+            </div>
+            <div id="slides" class="slides"></div>
+            <button id="trash-button" class="trash-button" disabled>回收站</button>
+        </aside>
+        <section class="stage" aria-label="当前页面">
+            <div id="page-header" class="page-header"></div>
+            <div class="section-header preview-heading"><h2>页面预览</h2><span id="preview-state"></span></div>
+            <div id="preview" class="preview"></div>
+            <div id="editor" class="editor"></div>
+        </section>
+        <aside class="inspector" aria-label="图片版本和任务">
+            <section id="board-card" hidden></section>
+            <div class="section-header"><h2>图片版本</h2></div>
+            <div id="versions" class="versions"></div>
+            <div id="jobs" class="jobs"></div>
+        </aside>
+    </main>
+    <dialog id="board-dialog">
+        <form id="board-form" class="settings-form">
+            <h2>编辑页面底板</h2>
+            <label for="page-type">页面类型</label>
+            <select id="page-type"><option>封面</option><option>内容</option><option>章节</option><option>总结</option></select>
+            <label for="board-content">内容要求</label>
+            <textarea id="board-content" maxlength="4000" placeholder="这页要让观众理解什么？"></textarea>
+            <label for="board-text">必须出现的文字</label>
+            <textarea id="board-text" maxlength="4000" placeholder="逐字保留的标题、数字或要点"></textarea>
+            <label for="board-style">本页风格</label>
+            <input id="board-style" maxlength="4000" placeholder="例如：左文右图，使用蓝色强调数字">
+            <p id="board-notice" class="muted"></p>
+            <div class="dialog-actions">
+                <button type="button" data-close="board-dialog">取消</button>
+                <button class="primary">保存底板</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog id="style-dialog">
+        <form id="style-form" class="settings-form">
+            <h2>项目风格</h2>
+            <label for="deck-style">生成新原图时使用的统一视觉要求</label>
+            <textarea id="deck-style" maxlength="4000" placeholder="例如：米白底、深绿色文字、留白充足"></textarea>
+            <div class="dialog-actions">
+                <button type="button" data-close="style-dialog">取消</button>
+                <button class="primary">保存风格</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog id="trash-dialog">
+        <div class="section-header"><h2>本项目回收站</h2><button data-close="trash-dialog">关闭</button></div>
+        <div id="trash-list"></div>
+    </dialog>
+    <dialog id="name-dialog">
+        <form id="name-form">
+            <h2 id="name-heading"></h2>
+            <label for="name-input">名称</label>
+            <input id="name-input" maxlength="100" required>
+            <div class="dialog-actions">
+                <button type="button" class="subtle" data-close="name-dialog">取消</button>
+                <button type="submit" class="primary">保存</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog id="exports-dialog">
+        <div class="section-header">
+            <h2>导出记录</h2>
+            <button class="icon" data-close="exports-dialog" aria-label="关闭">×</button>
+        </div>
+        <div class="export-actions">
+            <button id="export-pptx" class="primary">导出 PPTX</button>
+            <button id="export-pdf">导出 PDF</button>
+        </div>
+        <div id="export-list"></div>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+</body>
+</html>
