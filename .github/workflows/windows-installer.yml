@@ -1,0 +1,72 @@
+name: Windows installer
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build Windows installer
+        run: ./packaging/windows/build.ps1
+      - name: Verify install, application startup and uninstall
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $install = Join-Path $env:RUNNER_TEMP 'SlideBranch-install'
+          $env:SLIDEBRANCH_DATA = Join-Path $env:RUNNER_TEMP 'SlideBranch-data'
+          $env:SLIDEBRANCH_PORT = '18367'
+          $setup = Start-Process target/windows-installer/SlideBranch-Setup-x64.exe -ArgumentList '/VERYSILENT', '/NORESTART', ("/DIR=`"$install`"") -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with $($setup.ExitCode)" }
+          $app = Start-Process (Join-Path $install 'SlideBranch.exe') -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              if ($app.HasExited) { throw 'Desktop launcher exited early.' }
+              try {
+                $page = Invoke-WebRequest 'http://127.0.0.1:18367/' -TimeoutSec 2
+                if ($page.Content -match 'SlideBranch') { $ready = $true; break }
+              } catch { }
+              Start-Sleep -Seconds 1
+            }
+            if (!$ready) { throw 'Installed application failed to serve the workbench.' }
+          } finally {
+            if (!$app.HasExited) {
+              $null = $app.CloseMainWindow()
+              if (!$app.WaitForExit(5000)) { Stop-Process -Id $app.Id -Force }
+            }
+          }
+          $uninstall = Start-Process (Join-Path $install 'unins000.exe') -ArgumentList '/VERYSILENT', '/NORESTART' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0 -or (Test-Path "$install/SlideBranch.exe")) { throw 'Uninstall failed.' }
+          if (!(Test-Path "$env:SLIDEBRANCH_DATA/slidebranch.db")) { throw 'User database missing after uninstall.' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SlideBranch-Windows-x64
+          path: target/windows-installer/SlideBranch-Setup-x64.exe
+          if-no-files-found: error
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SlideBranch-Windows-x64
+      - name: Publish verified installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: gh release create "$TAG" SlideBranch-Setup-x64.exe --verify-tag --repo "$REPO" --title "SlideBranch $TAG" --notes "Windows x64 安装包。下载并双击 SlideBranch-Setup-x64.exe，安装后从桌面打开工作台。"
