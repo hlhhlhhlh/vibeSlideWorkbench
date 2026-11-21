@@ -1,0 +1,18 @@
+{
+  "title": "产品介绍",
+  "style": "蓝白配色，简洁的产品演示",
+  "slides": [
+    {
+      "page_type": "封面",
+      "required_text": "产品介绍\n2026",
+      "content": "展示产品的主视觉",
+      "local_style": ""
+    },
+    {
+      "page_type": "内容",
+      "required_text": "核心功能",
+      "content": "介绍三个主要功能及应用场景",
+      "local_style": ""
+    }
+  ]
+}
