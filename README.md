@@ -86,7 +86,7 @@ $env:RIGHTAPI_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'RightAPI
 
 应用供本机单用户使用。备份时先停止应用，再复制整个数据目录。
 
-启动时自动升级至数据库版本 4，合并页面要求并移除 `boards` 表。旧页面、图片、采用记录和导出明细沿用原 ID，历史 Job 和上传节点保留原页面要求。旧库没有记录的历史项目风格、尺寸和付费任务价格保留为未知，旧排队任务继续按执行时配置的尺寸处理。迁移在事务中完成，并在提交前检查所有外键。
+启动时自动升级至数据库版本 5，合并页面要求并移除 `boards` 表。旧页面、图片、采用记录和导出明细沿用原 ID，历史 Job 和上传节点保留原页面要求。旧库没有记录的历史项目风格、尺寸和付费任务价格保留为未知，旧排队任务继续按执行时配置的尺寸处理。迁移在事务中完成，并在提交前检查所有外键。
 
 ## 素材库后端接口
 
@@ -122,3 +122,28 @@ $env:RIGHTAPI_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'RightAPI
 `GET /api/decks/{deck}/costs` 返回 `currency`、`estimated_cost_cents`、`job_count`、`pending_job_count` 和 `unknown_job_count`，演示稿详情也包含同样的 `costs` 字段。累计费用包含已删除页面的 Job，删除演示稿后仍可读取其费用汇总。若调用期间删页，已完成的生成结果和费用仍会保存。
 
 完整字段和关系见 [数据库设计](docs/database-design.md)。
+
+## 文稿导入、多候选生成与空间清理
+
+首页提供“导入文稿”和“下载文稿模板”。导入按页组织的 JSON 后创建一份新演示稿，并自动填入各页内容、必含文字与风格。示例见 [文稿模板](src/main/resources/web/import-example.json)。顶层提供必填的 title 和非空 slides 数组，style 可选。每页可填 title、page_type、required_text、content、local_style，缺省类型为“内容”，其他字段为空字符串。文件上限为 8 MB，页内内容字段沿用 4000 字符上限，任一页面校验失败时整份导入回滚。
+
+左侧页面列表上方可选择每页候选数，界面支持 1 到 4 张。单页生图、修改图片和“生成所有页”均使用此数量。后端按设置中的“同时生图任务数”执行生图任务，默认 4，0 表示不限，每张结果各自对应一个 Job，分别记录费用与失败原因。整稿生成会根据各页当前要求创建新候选图，已有采用图由用户按需切换。整稿进度显示成功数和失败数，可一键重试该批失败任务。
+
+| 操作 | 接口及行为 |
+| --- | --- |
+| 导入文稿 | POST /api/decks/import，请求体为模板 JSON，返回新演示稿 id |
+| 单页多个候选 | POST /api/slides/{slide}/generate，增加 count；修改图时继续传 parent 和 instruction。返回首个 id 以及全部 jobs ID |
+| 整稿生成 | POST /api/decks/{deck}/generate，传 count，返回全部 jobs ID。未传 count 时每页生成一张，API 支持 1 到 16 张 |
+| 清理预览 | GET /api/decks/{deck}/cleanup，返回 file_count、bytes 和 token |
+| 确认清理 | POST /api/decks/{deck}/cleanup，传预览 token。可清理清单变化时返回 409，用户重新预览确认 |
+| 项目空间 | GET /api/decks 的每个项目包含 storage，其中 image_bytes 为去重图片文件大小，export_bytes 为导出文件大小，total_bytes 为两者之和 |
+
+在项目至少成功导出一次后，可以在导出对话框点击“清理未采用图片”。确认后永久删除符合条件的磁盘文件。历史导出引用、有效素材库引用、其他项目使用的图片、当前采用图，以及排队或运行中改图任务的源图都会保留。
+
+清理保留少量 assets 元数据、图片节点和 Job 历史，分别通过 purged_at 和 cleared_at 标记文件清除与候选图移除。已清理节点从图库中隐藏，不能再次预览、采用或作为改图源图。用户仍能查看原任务和费用，源文件已清理的改图任务无法重试。文件删除工作会在中断后于下次启动时继续，重新上传相同文件可以创建新的可用节点。
+
+首页项目卡片展示实际图片文件加导出文件的占用空间，包含回收站页面仍保留的文件，每个项目内部按文件去重。共享文件会分别计入引用它的项目，所有项目数字之和可能大于磁盘的实际总占用。数据库、设置与临时文件不计入此数字。
+
+数据库启动时迁移至版本 5，新增清理标记并保留原记录。接口与浏览器检查使用隔离目录和模拟绘图服务验证。
+
+设置中的“同时生图任务数”保存到本机 settings.properties，保存后立即生效，重启后保留。调小数值时已运行的任务继续完成，新任务等到空位后启动。GET /api/settings 返回 generationConcurrency，POST /api/settings 可传非负整数 generationConcurrency，旧调用省略该字段时保留原值。

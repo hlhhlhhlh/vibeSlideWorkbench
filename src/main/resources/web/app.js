@@ -11,8 +11,14 @@ const state = {
     busy: false,
     // 修改指令草稿，按图片 ID 保存
     drafts: new Map(),
-    // 已提交、等待完成后自动预览的任务
-    watch: new Set(),
+    // 已提交、等待完成后自动预览的任务：任务 ID → 同一次提交的分组。每组只自动切换一次预览
+    watch: new Map(),
+    // 生成/修改时每次出几张候选图，记在本机
+    count: 1,
+    // 「全部生成」每页张数与最近一次批量任务
+    batchCount: 1,
+    batch: null,
+    cleanupKey: null,
     textDirty: false,
     // 正在拖拽的页面；拖拽期间暂停自动刷新，避免列表被重绘打断
     dragging: null,
@@ -208,7 +214,7 @@ async function loadHome() {
         }
         const info = element("span", undefined, "deck-info");
         info.append(element("strong", deck.title),
-            element("small", deck.slide_count + " 页 · 更新于 " + formatTime(deck.updated_at)));
+            element("small", deck.slide_count + " 页 · " + formatBytes(deck.storage.total_bytes) + " · 更新于 " + formatTime(deck.updated_at)));
         open.append(info);
         const remove = button(undefined, () => deleteDeck(deck), "icon danger deck-delete", false, "trash");
         remove.title = "删除项目";
@@ -361,15 +367,17 @@ function defaultNode(slide) {
 
 // 提交的任务完成后，预览自动切到新图片
 function followJobs(data) {
-    for (const id of state.watch) {
+    for (const [id, group] of state.watch) {
         const job = data.jobs.find((item) => item.id === id);
         if (!job || job.status === "failed") {
             state.watch.delete(id);
         } else if (job.status === "succeeded") {
             state.watch.delete(id);
             const node = data.nodes.find((item) => item.generation_job_id === id);
-            if (node && node.slide_id === state.slide) {
+            // 一次出多张时只切到最先完成的那张，避免预览随后续结果来回跳
+            if (!group.followed && node && node.slide_id === state.slide) {
                 state.node = node.id;
+                group.followed = true;
             }
         }
     }
@@ -576,6 +584,7 @@ function selectSlide(slide) {
 
 function render() {
     const data = state.data;
+    renderBatch(data);
     const slides = data?.slides ?? [];
     const index = slides.findIndex((slide) => slide.id === state.slide);
     const slide = slides[index];
@@ -650,8 +659,16 @@ function renderSlides(slides) {
         const caption = (slide.content || slide.required_text).split("\n")[0] || slide.page_type;
         card.append(element("small", caption));
         const materials = state.data.nodes.filter((node) => node.slide_id === slide.id && node.library_item_id !== null).length;
-        if (materials > 0) {
-            card.append(element("span", "素材 " + materials, "slide-materials"));
+        const working = state.data.jobs.filter((job) => job.slide_id === slide.id && ["queued", "running"].includes(job.status)).length;
+        if (materials > 0 || working > 0) {
+            const meta = element("span", undefined, "slide-meta");
+            if (working > 0) {
+                meta.append(element("span", "生成中 " + working, "status running"));
+            }
+            if (materials > 0) {
+                meta.append(element("span", "素材 " + materials, "slide-materials"));
+            }
+            card.append(meta);
         }
         card.title = "第 " + (index + 1) + " 页 · " + caption + "（可拖动调整顺序，也可拖入素材）";
         bindDrag(card, slide, index);
@@ -833,8 +850,14 @@ function renderEditor(editor, slide, viewed) {
     hint.append(element("kbd", "Ctrl"), " + ", element("kbd", "Enter"));
     const submit = element("button", undefined, "primary");
     submit.type = "submit";
-    submit.append(icon("branch"), element("span", "修改"));
-    controls.append(hint, submit);
+    const submitLabel = element("span", editLabel());
+    submitLabel.id = "edit-submit-label";
+    submit.append(icon("branch"), submitLabel);
+    const picker = element("div", undefined, "count-picker");
+    picker.setAttribute("role", "group");
+    picker.setAttribute("aria-label", "修改出几张");
+    countPicker(picker, () => state.count, setCount);
+    controls.append(hint, picker, submit);
     form.append(head, prompt, controls);
     form.onsubmit = (event) => {
         event.preventDefault();
@@ -846,8 +869,8 @@ function renderEditor(editor, slide, viewed) {
         }
         void act(async () => {
             await saveText();
-            const result = await api(path + "/generate", "POST", { parent: viewed.id, instruction });
-            state.watch.add(result.id);
+            const result = await api(path + "/generate", "POST", { parent: viewed.id, instruction, count: state.count });
+            watchJobs(result.jobs);
             state.drafts.delete(key);
         });
     };
@@ -897,7 +920,7 @@ function renderGallery(slide, nodes, jobs) {
             message.title = message.textContent;
             box.append(message, button("重试", () => act(async () => {
                 const result = await api("/slides/" + slide.id + "/retry", "POST", { job: job.id });
-                state.watch.add(result.id);
+                watchJobs([result.id]);
             }), "", false, "retry"));
         } else {
             box.append(element("span", job.parent_node_id === null ? "生成中" : "修改中", "status running"));
@@ -937,6 +960,11 @@ function renderGallery(slide, nodes, jobs) {
 }
 
 function renderExports(exports, slides) {
+    // 导出对话框开着时，新完成的导出会改变可清理的图片
+    const key = state.deck + ":" + exports.filter((item) => item.status === "succeeded").length;
+    if ($("exports-dialog").open && key !== state.cleanupKey) {
+        void loadCleanup();
+    }
     const list = $("export-list");
     list.replaceChildren();
     const missing = slides.flatMap((slide, index) => slide.selected_node_id === null ? [index + 1] : []);
@@ -982,6 +1010,7 @@ const openSettings = async () => {
         $("settings-key").disabled = false;
         $("settings-model").value = settings.model;
         $("settings-size").value = settings.size;
+        $("settings-concurrency").value = settings.generationConcurrency;
         $("settings-remove-row").hidden = !settings.savedKey;
         let hint = "输入密钥后，将使用当前 Windows 账户加密保存。";
         if (settings.savedKey) {
@@ -1014,6 +1043,7 @@ $("settings-form").onsubmit = (event) => {
             key: $("settings-key").value,
             model: $("settings-model").value,
             size: $("settings-size").value,
+            generationConcurrency: Number($("settings-concurrency").value),
             removeKey: $("settings-remove").checked
         });
         updateMode(result);
@@ -1042,8 +1072,8 @@ $("text-form").onsubmit = (event) => {
     const slide = state.slide;
     void act(async () => {
         await saveText();
-        const result = await api("/slides/" + slide + "/generate", "POST", { parent: null, instruction: "" });
-        state.watch.add(result.id);
+        const result = await api("/slides/" + slide + "/generate", "POST", { parent: null, instruction: "", count: state.count });
+        watchJobs(result.jobs);
     });
 };
 $("upload-button").onclick = () => $("upload-input").click();
@@ -1142,6 +1172,7 @@ $("name-form").onsubmit = (event) => {
 };
 $("exports-button").onclick = () => {
     $("exports-dialog").showModal();
+    void loadCleanup();
 };
 for (const format of ["pptx", "pdf"]) {
     $("export-" + format).onclick = () => act(() => api("/decks/" + state.deck + "/exports", "POST", { format }));
@@ -1155,6 +1186,254 @@ window.addEventListener("beforeunload", (event) => {
         event.preventDefault();
     }
 });
+
+// ---------- 一次出几张 ----------
+const COUNTS = [1, 2, 3, 4];
+
+function readStoredCount(name) {
+    try {
+        const value = Number(localStorage.getItem(name));
+        return COUNTS.includes(value) ? value : 1;
+    } catch {
+        return 1;
+    }
+}
+
+function storeCount(name, value) {
+    try {
+        localStorage.setItem(name, String(value));
+    } catch {
+        // 无法保存时只影响本次会话
+    }
+}
+
+// 分段选择器：1 / 2 / 3 / 4 张。get 读当前值，set 写入新值
+function countPicker(box, get, set) {
+    box.replaceChildren();
+    for (const value of COUNTS) {
+        const item = button(value + " 张", () => {
+            set(value);
+            for (const other of box.children) {
+                other.setAttribute("aria-pressed", String(other.dataset.value === String(value)));
+            }
+        }, "count-option");
+        item.dataset.value = String(value);
+        item.setAttribute("aria-pressed", String(get() === value));
+        item.title = value === 1 ? "生成 1 张" : "一次生成 " + value + " 张候选图，按张计费";
+        box.append(item);
+    }
+}
+
+function generateLabel() {
+    return state.count === 1 ? "生成图片" : "生成 " + state.count + " 张";
+}
+
+function editLabel() {
+    return state.count === 1 ? "修改" : "修改出 " + state.count + " 张";
+}
+
+// 页面文字和修改框共用一个张数，切换任一处另一处同步
+function setCount(value) {
+    state.count = value;
+    storeCount("slidebranch-count", value);
+    $("text-submit-label").textContent = generateLabel();
+    countPicker($("text-count"), () => state.count, setCount);
+    const edit = document.querySelector(".edit-form .count-picker");
+    if (edit) {
+        countPicker(edit, () => state.count, setCount);
+        $("edit-submit-label").textContent = editLabel();
+    }
+}
+
+function watchJobs(ids) {
+    const group = { followed: false };
+    for (const id of ids) {
+        state.watch.set(id, group);
+    }
+}
+
+function formatBytes(value) {
+    const units = ["B", "KB", "MB", "GB"];
+    let size = value;
+    let unit = 0;
+    while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit++;
+    }
+    return (unit === 0 ? String(size) : size.toFixed(1)) + " " + units[unit];
+}
+
+// ---------- 全部生成 ----------
+function renderBatch(data) {
+    $("generate-all").disabled = !data || data.slides.length === 0;
+    const box = $("batch-progress");
+    const batch = state.batch;
+    box.replaceChildren();
+    if (!batch || batch.deck !== state.deck || !data) {
+        box.hidden = true;
+        return;
+    }
+    const jobs = data.jobs.filter((job) => batch.jobs.includes(job.id));
+    const done = jobs.filter((job) => job.status === "succeeded").length;
+    const failed = jobs.filter((job) => job.status === "failed");
+    const total = batch.jobs.length;
+    const finished = done + failed.length === total;
+    box.hidden = false;
+    box.classList.toggle("has-failed", failed.length > 0);
+    const head = element("div", undefined, "batch-head");
+    let text = "全部生成 · " + done + "/" + total;
+    if (finished && failed.length === 0) {
+        text = "全部生成完成 · " + total + " 张";
+    }
+    head.append(element("strong", text));
+    const close = button(undefined, () => {
+        state.batch = null;
+        render();
+    }, "icon", false, "close");
+    close.title = finished ? "关闭" : "隐藏进度（任务会继续）";
+    close.setAttribute("aria-label", close.title);
+    head.append(close);
+    const bar = element("div", undefined, "batch-bar");
+    const fill = element("span");
+    fill.style.width = (total ? (done + failed.length) / total * 100 : 0) + "%";
+    bar.append(fill);
+    box.append(head, bar);
+    if (failed.length > 0) {
+        const row = element("div", undefined, "batch-failed");
+        row.append(element("span", failed.length + " 张失败"),
+            button("全部重试", () => act(async () => {
+                for (const job of failed) {
+                    const result = await api("/slides/" + job.slide_id + "/retry", "POST", { job: job.id });
+                    batch.jobs = batch.jobs.map((id) => id === job.id ? result.id : id);
+                    watchJobs([result.id]);
+                }
+            }), "ghost small", false, "retry"));
+        box.append(row);
+    }
+}
+
+function renderBatchDialog() {
+    const slides = state.data.slides;
+    const count = state.batchCount;
+    const total = slides.length * count;
+    $("batch-summary").replaceChildren(
+        "共 ", element("strong", slides.length + " 页"), " × " + count + " 张 = ",
+        element("strong", total + " 次生成"), "，每次成功都按当前模型计费。");
+    $("batch-submit-label").textContent = "生成 " + total + " 张";
+    const notes = $("batch-notes");
+    notes.replaceChildren();
+    const pages = (test) => slides.flatMap((slide, index) => test(slide) ? [index + 1] : []);
+    const blank = pages((slide) => !slide.content.trim() && !slide.required_text.trim());
+    const adopted = pages((slide) => slide.selected_node_id !== null);
+    if (blank.length > 0) {
+        notes.append(element("p", "第 " + blank.join("、") + " 页还没有写文字，只会按页面类型和风格生成。", "notice warn"));
+    }
+    if (adopted.length > 0) {
+        notes.append(element("p", "第 " + adopted.join("、") + " 页已采用图片。新图片只加入候选，不会替换已采用的图。", "notice"));
+    }
+}
+
+$("generate-all").onclick = () => {
+    if (!state.data || state.data.slides.length === 0) {
+        return;
+    }
+    void saveText().catch((error) => toast(error.message));
+    countPicker($("batch-count"), () => state.batchCount, (value) => {
+        state.batchCount = value;
+        storeCount("slidebranch-batch-count", value);
+        renderBatchDialog();
+    });
+    renderBatchDialog();
+    $("batch-dialog").showModal();
+};
+
+$("batch-form").onsubmit = (event) => {
+    event.preventDefault();
+    const deck = state.deck;
+    const count = state.batchCount;
+    $("batch-dialog").close();
+    void act(async () => {
+        await saveText();
+        const result = await api("/decks/" + deck + "/generate", "POST", { count });
+        state.batch = { deck, jobs: result.jobs };
+        watchJobs(result.jobs);
+    });
+};
+
+// ---------- 导入文稿 ----------
+$("import-deck").onclick = () => $("import-file").click();
+$("import-file").onchange = async () => {
+    const file = $("import-file").files[0];
+    $("import-file").value = "";
+    if (!file) {
+        return;
+    }
+    try {
+        if (file.size > 8 * 1024 * 1024) {
+            throw new Error("JSON 文稿不能超过 8 MB。");
+        }
+        let input;
+        try {
+            input = JSON.parse(await file.text());
+        } catch {
+            throw new Error("文件不是有效的 JSON，可以下载模板对照格式。");
+        }
+        const result = await api("/decks/import", "POST", input);
+        location.hash = "#/deck/" + result.id;
+        toast("已导入 " + (input.slides?.length ?? 0) + " 页，可以点「全部生成」一次出图");
+    } catch (error) {
+        toast(error.message);
+    }
+};
+
+// ---------- 清理未采用图片 ----------
+async function loadCleanup() {
+    const deck = state.deck;
+    const exports = state.data?.exports ?? [];
+    const summary = $("cleanup-summary");
+    const action = $("cleanup-project");
+    state.cleanupKey = deck + ":" + exports.filter((item) => item.status === "succeeded").length;
+    action.disabled = true;
+    action.dataset.token = "";
+    if (!exports.some((item) => item.status === "succeeded")) {
+        summary.textContent = "成功导出一次后，可以删除没被采用、也没进过导出的旧图片。";
+        return;
+    }
+    summary.textContent = "正在统计…";
+    try {
+        const preview = await api("/decks/" + deck + "/cleanup");
+        if (deck !== state.deck) {
+            return;
+        }
+        if (preview.file_count === 0) {
+            summary.textContent = "没有可以清理的图片。";
+            return;
+        }
+        summary.replaceChildren("有 ", element("strong", preview.file_count + " 张"),
+            "未采用的图片可以删除，释放 " + formatBytes(preview.bytes) + "。删除后无法恢复，也不能再基于它们修改。");
+        action.dataset.token = preview.token;
+        action.dataset.count = String(preview.file_count);
+        action.disabled = false;
+    } catch (error) {
+        summary.textContent = error.message;
+    }
+}
+
+$("cleanup-project").onclick = () => {
+    const action = $("cleanup-project");
+    if (!window.confirm("永久删除 " + action.dataset.count + " 张未采用的图片？此操作无法撤销。")) {
+        return;
+    }
+    const deck = state.deck;
+    void act(async () => {
+        const result = await api("/decks/" + deck + "/cleanup", "POST", { token: action.dataset.token });
+        toast("已删除 " + result.file_count + " 张图片，释放 " + formatBytes(result.bytes));
+    }).then(loadCleanup);
+};
+
+state.count = readStoredCount("slidebranch-count");
+state.batchCount = readStoredCount("slidebranch-batch-count");
+setCount(state.count);
 
 if (!location.hash.startsWith("#/deck/")) {
     history.replaceState(null, "", "#/");
@@ -1176,3 +1455,4 @@ setInterval(() => {
     lastPoll = Date.now();
     void refresh().catch(() => {});
 }, 1400);
+

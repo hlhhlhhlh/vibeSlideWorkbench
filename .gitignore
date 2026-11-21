@@ -1,5 +1,42 @@
+# Build output (Maven, jpackage images, ZIP, Inno Setup installer)
 /target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+*.war
+*.exe
+*.msi
+*.zip
+
+# Local runtime data: SQLite DB, settings (may hold API keys), generated images, exports
 /data/
+*.db
+*.db-shm
+*.db-wal
+*.lock
+settings.properties
+
+# Local tools
 /.tools/
+
+# Secrets
+.env
+.env.*
+
+# IDE
 /.idea/
 *.iml
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Logs
+*.log
+hs_err_pid*.log
+
+# Old local backups
+/.frontend-backup/

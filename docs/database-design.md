@@ -1,6 +1,6 @@
 # 数据库设计
 
-数据库版本 4，共 8 张业务表。页面当前要求直接存入 `slides`，每次生成时将要求复制进 Job。素材库保存图片名称和标签，拖入页面时建立图片节点并记录素材来源。
+数据库版本 5，共 8 张业务表。页面当前要求直接存入 `slides`，每次生成时将要求复制进 Job。素材库保存图片名称和标签，拖入页面时建立图片节点并记录素材来源。
 
 ## 主要关系
 
@@ -57,6 +57,7 @@ ID 和整数金额使用 INTEGER，文本、JSON 和时间使用 TEXT。下表�
 | `storage_key` | 必填且唯一，实际文件名 |
 | `mime_type` | 必填，图片类型 |
 | `width, height, byte_size` | 必填，尺寸和文件大小 |
+| `purged_at` | 可空，文件已进入清理队列的时间，历史元数据保留 |
 
 ### library_items
 
@@ -82,8 +83,9 @@ ID 和整数金额使用 INTEGER，文本、JSON 和时间使用 TEXT。下表�
 | `library_item_id` | 可空，外键指向 `library_items`，只在素材拖入时填写 |
 | `requirements_snapshot_json` | 可空，上传或拖入时必填，保存此时页面要求；生成图通过 Job 读取快照 |
 | `created_at` | 必填，默认当前时间 |
+| `cleared_at` | 可空，候选图已清理的时间，列表和来源可用性检查排除这些节点 |
 
-图片节点不可 UPDATE。生成图必须对应本页正在运行的 Job，同一 Job 最多产生一张图。素材节点必须使用该素材的原始 `asset_id`，并且没有 Job。每次拖入分别插入一行，重复拖入允许产生多个节点。
+图片节点的原始内容不可 UPDATE，清理时允许设置 cleared_at。生成图必须对应本页正在运行的 Job，同一 Job 最多产生一张图。素材节点必须使用该素材的原始 `asset_id`，并且没有 Job。每次拖入分别插入一行，重复拖入允许产生多个节点。
 
 旧图的修改关系沿 `image_nodes.job_id → generation_jobs.source_node_id` 追溯。API 仍派生返回 `parent_id` 和 `generation_job_id`，供当前前端使用。
 
@@ -203,3 +205,11 @@ erDiagram
 当前前端继续通过 `/board` 保存要求，`board` 参数、`X-Board-Id` 和响应 `board_id` 对应页面要求版本号。新的接口使用 `/requirements`、`revision` 和 `X-Requirements-Revision`。兼容响应 `boards` 数组列出当前要求。生成图、素材拖入与上传仍需用户显式采用后才参与导出。
 
 素材和计费接口详见 [README](../README.md)。
+
+## 版本 5 的批量任务与文件生命周期
+
+文稿导入先校验字段，在一个事务内写入 decks 和 slides，发生错误整份回滚。单页多候选和整稿生成均原子创建多条 generation_jobs，后台按本机并发设置领取任务，默认 4，设置为 0 时不限，单个 Job 仍然最多产出一张图。整稿失败任务可分别重试。
+
+清理操作从目标项目的 assets 中选取候选，排除 export_items、有效 library_items、其他项目、当前采用图和活跃任务源图所需的文件。数据库事务先写入 purged_at 和 cleared_at，再删除磁盘文件。若删除过程被中断，下次启动读取 purged_at 继续删除。重新上传同一内容时恢复文件可用性，并创建新的节点，原已清理节点保留标记。
+
+项目空间统计读取仍可用节点引用的去重文件和项目导出文件的实际大小，共享文件会计入每个使用它的项目。使用方式、接口和 JSON 模板见 README 的“文稿导入、多候选生成与空间清理”。

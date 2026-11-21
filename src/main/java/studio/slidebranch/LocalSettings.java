@@ -45,12 +45,20 @@ final class LocalSettings {
         return saved.getProperty("size", Images.environment("IMAGE_SIZE", "1536x864"));
     }
 
-    synchronized Map<String,Object> view() {
-        return Map.of("model", model(), "size", size(), "savedKey", !savedKey.isEmpty(),
-                "environmentKey", !Images.environment("RIGHTAPI_KEY", "").isEmpty());
+    synchronized int generationConcurrency() {
+        return Integer.parseInt(saved.getProperty("generationConcurrency", "4"));
     }
 
-    synchronized void save(String model, String size, String replacement, boolean remove) throws Exception {
+    synchronized Map<String,Object> view() {
+        return Map.of("model", model(), "size", size(), "savedKey", !savedKey.isEmpty(),
+                "environmentKey", !Images.environment("RIGHTAPI_KEY", "").isEmpty(),
+                "generationConcurrency", generationConcurrency());
+    }
+
+    synchronized void save(String model, String size, String replacement, boolean remove, int concurrency) throws Exception {
+        if (concurrency < 0) {
+            throw new Problem(400, "并发任务数须为非负整数，0 表示不限。");
+        }
         if (!model.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,99}")) {
             throw new Problem(400, "请输入有效的模型名称。");
         }
@@ -70,6 +78,7 @@ final class LocalSettings {
         next.putAll(saved);
         next.setProperty("model", model);
         next.setProperty("size", size);
+        next.setProperty("generationConcurrency", Integer.toString(concurrency));
         String nextKey = savedKey;
         if (remove) {
             next.remove("rightapiKey");

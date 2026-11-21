@@ -43,6 +43,14 @@
                     <span class="home-action-icon" data-icon="plus"></span>
                     <span class="home-action-text"><strong>新增项目</strong><small>从空白演示稿开始</small></span>
                 </button>
+                <div class="home-action home-action-split">
+                    <button id="import-deck" type="button" class="home-action-main">
+                        <span class="home-action-icon" data-icon="upload"></span>
+                        <span class="home-action-text"><strong>导入文稿</strong><small>上传 JSON，自动填好每页文字</small></span>
+                    </button>
+                    <a class="home-action-link" href="/import-example.json" download title="下载 JSON 文稿模板"><span data-icon="download"></span>模板</a>
+                </div>
+                <input id="import-file" type="file" accept=".json,application/json" hidden>
                 <button id="home-settings" type="button" class="home-action">
                     <span class="home-action-icon" data-icon="settings"></span>
                     <span class="home-action-text"><strong>设置</strong><small>密钥、绘图模型和图片尺寸</small></span>
@@ -58,8 +66,12 @@
         <aside class="sidebar" aria-label="页面列表">
             <div class="panel-header">
                 <h2>页面 <span id="slide-count" class="count"></span></h2>
-                <button id="add-slide" class="icon" aria-label="添加页面" title="添加页面" disabled><span data-icon="plus"></span></button>
+                <span class="panel-actions">
+                    <button id="generate-all" class="ghost small" type="button" disabled title="为所有页面一次生成图片"><span data-icon="sparkle"></span><span>全部生成</span></button>
+                    <button id="add-slide" class="icon" aria-label="添加页面" title="添加页面" disabled><span data-icon="plus"></span></button>
+                </span>
             </div>
+            <div id="batch-progress" class="batch-status" role="status" aria-live="polite" hidden></div>
             <div id="slides" class="slides"></div>
             <button id="trash-button" class="trash-button ghost" disabled><span data-icon="trash"></span><span id="trash-label">回收站</span></button>
         </aside>
@@ -121,7 +133,10 @@
                         <input id="text-style" maxlength="4000" placeholder="例如：左文右图，蓝色强调数字">
                     </div>
                     <button type="button" id="deck-style-link" class="link"></button>
-                    <button type="submit" class="primary"><span data-icon="sparkle"></span><span>生成图片</span></button>
+                    <div class="submit-row">
+                        <div id="text-count" class="count-picker" role="group" aria-label="生成张数"></div>
+                        <button type="submit" class="primary"><span data-icon="sparkle"></span><span id="text-submit-label">生成图片</span></button>
+                    </div>
                 </form>
             </section>
             <section class="card">
@@ -166,6 +181,11 @@
                     <option value="1024x1024">正方形</option>
                     <option value="auto">自动</option>
                 </datalist>
+            </div>
+            <div class="field">
+                <label for="settings-concurrency">同时生图任务数</label>
+                <input id="settings-concurrency" type="number" min="0" step="1" value="4" required aria-describedby="settings-concurrency-hint">
+                <small id="settings-concurrency-hint">0 表示不限。保存后立即生效，正在执行的任务会继续完成。</small>
             </div>
             <div class="dialog-actions">
                 <button type="button" class="ghost" data-close="settings-dialog">取消</button>
@@ -223,6 +243,30 @@
         </div>
         <h3 class="subheading">导出记录</h3>
         <div id="export-list"></div>
+        <h3 class="subheading">释放空间</h3>
+        <div class="cleanup-row">
+            <p id="cleanup-summary" class="muted"></p>
+            <button id="cleanup-project" type="button" class="danger-outline" disabled><span data-icon="trash"></span><span>清理</span></button>
+        </div>
+    </dialog>
+    <dialog id="batch-dialog" aria-labelledby="batch-title">
+        <form id="batch-form" class="settings-form">
+            <div class="dialog-header">
+                <h2 id="batch-title">为所有页面生成图片</h2>
+                <button type="button" class="icon" data-close="batch-dialog" aria-label="关闭"><span data-icon="close"></span></button>
+            </div>
+            <div class="batch-count">
+                <span>每页生成</span>
+                <div id="batch-count" class="count-picker" role="group" aria-label="每页生成张数"></div>
+                <span>张候选图</span>
+            </div>
+            <p id="batch-summary" class="batch-summary"></p>
+            <div id="batch-notes" class="batch-notes"></div>
+            <div class="dialog-actions">
+                <button type="button" class="ghost" data-close="batch-dialog">取消</button>
+                <button type="submit" class="primary"><span data-icon="sparkle"></span><span id="batch-submit-label">开始生成</span></button>
+            </div>
+        </form>
     </dialog>
     <div id="toast" role="status" hidden></div>
 </body>

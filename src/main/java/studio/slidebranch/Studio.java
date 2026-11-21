@@ -32,11 +32,12 @@ final class Studio {
             }
             return null;
         });
+        new ProjectActions(this).purgeFiles();
     }
 
     // 首页的项目列表：页数、封面（第一页采用的图片）和最近修改时间
-    List<Map<String, Object>> decks() throws SQLException {
-        return db.rows("""
+    List<Map<String, Object>> decks() throws Exception {
+        var rows = db.rows("""
                 SELECT d.id, d.title, d.created_at,
                     (SELECT COUNT(*) FROM slides s WHERE s.deck_id=d.id AND s.deleted_at IS NULL) AS slide_count,
                     (SELECT s.selected_node_id FROM slides s WHERE s.deck_id=d.id AND s.deleted_at IS NULL
@@ -45,6 +46,10 @@ final class Studio {
                         WHERE s.deck_id=d.id), d.created_at) AS updated_at
                 FROM decks d WHERE d.deleted_at IS NULL ORDER BY updated_at DESC, d.id DESC
                 """);
+        for (var row : rows) {
+            row.put("storage", new ProjectActions(this).storage(number(row, "id")));
+        }
+        return rows;
     }
 
     void deleteDeck(long id) throws Exception {
@@ -76,7 +81,7 @@ final class Studio {
                             j.instruction, j.provider
                         FROM image_nodes n JOIN slides s ON s.id=n.slide_id
                         LEFT JOIN generation_jobs j ON j.id=n.job_id
-                        WHERE s.deck_id=? AND s.deleted_at IS NULL ORDER BY n.id
+                        WHERE s.deck_id=? AND s.deleted_at IS NULL AND n.cleared_at IS NULL ORDER BY n.id
                         """, id),
                 "jobs", db.rows("""
                         SELECT j.*, j.source_node_id AS parent_node_id,
@@ -174,7 +179,7 @@ final class Studio {
     void select(long slide, long node) throws Exception {
         db.transaction(() -> {
             activeSlide(slide);
-            db.one("SELECT id FROM image_nodes WHERE id=? AND slide_id=?", node, slide);
+            db.one("SELECT id FROM image_nodes WHERE id=? AND slide_id=? AND cleared_at IS NULL", node, slide);
             db.execute("UPDATE slides SET selected_node_id=? WHERE id=?", node, slide);
             return null;
         });
@@ -219,8 +224,8 @@ final class Studio {
     }
 
     long upload(long slide, Long expected, byte[] bytes) throws Exception {
-        Images.Asset file = Images.save(assets, bytes);
         return db.transaction(() -> {
+            Images.Asset file = Images.save(assets, bytes);
             var current = requirements(slide, expected);
             return db.insert("INSERT INTO image_nodes(slide_id, asset_id, requirements_snapshot_json) VALUES(?,?,?)",
                     slide, saveAsset(file), snapshot(current));
@@ -254,7 +259,7 @@ final class Studio {
                 var source = db.one("""
                         SELECT COALESCE(j.requirements_snapshot_json, n.requirements_snapshot_json) AS snapshot
                         FROM image_nodes n LEFT JOIN generation_jobs j ON j.id=n.job_id
-                        WHERE n.id=? AND n.slide_id=?
+                        WHERE n.id=? AND n.slide_id=? AND n.cleared_at IS NULL
                         """, parent, slide);
                 if (instruction.isBlank()) {
                     prompt = requirementChanges((String) source.get("snapshot"), current);
@@ -298,7 +303,7 @@ final class Studio {
     private long saveAsset(Images.Asset file) throws SQLException {
         db.execute("""
                 INSERT INTO assets(sha256, storage_key, mime_type, width, height, byte_size)
-                VALUES(?,?,?,?,?,?) ON CONFLICT(sha256) DO NOTHING
+                VALUES(?,?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET purged_at=NULL
                 """, file.hash(), file.key(), file.mime(), file.width(), file.height(), file.size());
         return number(db.one("SELECT id FROM assets WHERE sha256=?", file.hash()), "id");
     }
@@ -318,7 +323,7 @@ final class Studio {
                 SELECT l.*, a.mime_type, a.width, a.height, a.byte_size,
                     (SELECT COUNT(*) FROM image_nodes n JOIN slides s ON s.id=n.slide_id
                         JOIN decks d ON d.id=s.deck_id WHERE n.library_item_id=l.id
-                        AND s.deleted_at IS NULL AND d.deleted_at IS NULL) AS usage_count
+                        AND s.deleted_at IS NULL AND d.deleted_at IS NULL AND n.cleared_at IS NULL) AS usage_count
                 FROM library_items l JOIN assets a ON a.id=l.asset_id WHERE l.deleted_at IS NULL
                 """ + filter + " ORDER BY l.id DESC", values.toArray());
         for (var row : rows) {
@@ -332,7 +337,7 @@ final class Studio {
                 SELECT l.*, a.mime_type, a.width, a.height, a.byte_size,
                     (SELECT COUNT(*) FROM image_nodes n JOIN slides s ON s.id=n.slide_id
                         JOIN decks d ON d.id=s.deck_id WHERE n.library_item_id=l.id
-                        AND s.deleted_at IS NULL AND d.deleted_at IS NULL) AS usage_count
+                        AND s.deleted_at IS NULL AND d.deleted_at IS NULL AND n.cleared_at IS NULL) AS usage_count
                 FROM library_items l JOIN assets a ON a.id=l.asset_id
                 WHERE l.id=? AND l.deleted_at IS NULL
                 """, id);
@@ -351,9 +356,11 @@ final class Studio {
     long uploadLibrary(byte[] bytes, String name, List<String> tags) throws Exception {
         String title = libraryName(name);
         String serializedTags = libraryTags(tags);
-        Images.Asset file = Images.save(assets, bytes);
-        return db.transaction(() -> db.insert("INSERT INTO library_items(asset_id,name,tags_json) VALUES(?,?,?)",
-                saveAsset(file), title, serializedTags));
+        return db.transaction(() -> {
+            Images.Asset file = Images.save(assets, bytes);
+            return db.insert("INSERT INTO library_items(asset_id,name,tags_json) VALUES(?,?,?)",
+                    saveAsset(file), title, serializedTags);
+        });
     }
 
     void updateLibrary(long id, String name, List<String> tags) throws Exception {
@@ -425,6 +432,9 @@ final class Studio {
             activeSlide(slide);
             var job = db.one("SELECT * FROM generation_jobs WHERE id=? AND slide_id=? AND status='failed'",
                     jobId, slide);
+            if (job.get("source_node_id") != null) {
+                nodeAsset(((Number) job.get("source_node_id")).longValue());
+            }
             return insertJob(slide, job.get("source_node_id"), jobId,
                     (String) job.get("requirements_snapshot_json"), (String) job.get("instruction"));
         });
@@ -477,7 +487,7 @@ final class Studio {
                 """, deck);
     }
 
-    private Map<String, Object> claim(String table) throws Exception {
+    Map<String, Object> claim(String table) throws Exception {
         return db.transaction(() -> {
             var queued = db.rows("SELECT * FROM " + table + " WHERE status='queued' ORDER BY id LIMIT 1");
             if (queued.isEmpty()) {
@@ -493,11 +503,7 @@ final class Studio {
         });
     }
 
-    void runGeneration() throws Exception {
-        var job = claim("generation_jobs");
-        if (job == null) {
-            return;
-        }
+    void runGeneration(Map<String, Object> job) throws Exception {
         long jobId = number(job, "id");
         long slide = number(job, "slide_id");
         Object parent = job.get("source_node_id");
@@ -512,10 +518,11 @@ final class Studio {
                 // Historical queued tasks used the configured size at execution time.
                 size = images.size();
             }
-            var file = Images.save(assets, images.generate((String) job.get("provider"), (String) job.get("model"),
+            byte[] output = images.generate((String) job.get("provider"), (String) job.get("model"),
                     size, input, (String) job.get("instruction"), jobId,
-                    task -> recordProviderTask(jobId, task)));
+                    task -> recordProviderTask(jobId, task));
             db.transaction(() -> {
+                var file = Images.save(assets, output);
                 // Keep completed results and their cost even if the page was deleted during the API call.
                 db.insert("""
                         INSERT INTO image_nodes(slide_id,asset_id,job_id) VALUES(?,?,?)
@@ -542,7 +549,7 @@ final class Studio {
     }
 
     Map<String, Object> nodeAsset(long node) throws SQLException {
-        return db.one("SELECT a.* FROM assets a JOIN image_nodes n ON n.asset_id=a.id WHERE n.id=?", node);
+        return db.one("SELECT a.* FROM assets a JOIN image_nodes n ON n.asset_id=a.id WHERE n.id=? AND n.cleared_at IS NULL AND a.purged_at IS NULL", node);
     }
 
     long enqueueExport(long deck, String format) throws Exception {

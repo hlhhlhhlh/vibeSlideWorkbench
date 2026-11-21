@@ -34,6 +34,10 @@ public final class Main {
         System.setProperty("java.awt.headless", "true");
         Path dir = Files.createDirectories(Path.of(Images.environment("SLIDEBRANCH_DATA", "data")).toAbsolutePath());
         int port = Integer.parseInt(Images.environment("SLIDEBRANCH_PORT", "8080"));
+        start(dir, port);
+    }
+
+    static int start(Path dir, int port) throws Exception {
         var lockFile = FileChannel.open(dir.resolve("instance.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
         var lock = lockFile.tryLock();
         if (lock == null) {
@@ -45,16 +49,18 @@ public final class Main {
         var studio = new Studio(db, dir);
         var main = new Main(studio);
         var workers = Executors.newScheduledThreadPool(2);
+        var generations = new GenerationQueue(studio);
         var requests = Executors.newVirtualThreadPerTaskExecutor();
         server.createContext("/", main::handle);
         server.setExecutor(requests);
-        workers.scheduleWithFixedDelay(() -> run(studio::runGeneration), 0, 350, TimeUnit.MILLISECONDS);
+        workers.scheduleWithFixedDelay(() -> run(generations::dispatch), 0, 350, TimeUnit.MILLISECONDS);
         workers.scheduleWithFixedDelay(() -> run(studio::runExport), 0, 350, TimeUnit.MILLISECONDS);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.stop(0);
             workers.shutdownNow();
             requests.shutdownNow();
             run(() -> {
+                generations.close();
                 db.close();
                 lock.release();
                 lockFile.close();
@@ -62,6 +68,7 @@ public final class Main {
         }));
         server.start();
         System.out.println("SlideBranch http://127.0.0.1:" + server.getAddress().getPort() + " [" + studio.images.provider() + "]");
+        return server.getAddress().getPort();
     }
 
     @FunctionalInterface
@@ -123,12 +130,28 @@ public final class Main {
                 String replacement = optionalText(data, "key");
                 boolean remove = data.has("removeKey") && data.get("removeKey").getAsBoolean();
                 synchronized (studio.settings) {
-                    studio.settings.save(field(data, "model", 100), field(data, "size", 20), replacement, remove);
+                    int concurrency = studio.settings.generationConcurrency();
+                    if (data.has("generationConcurrency")) {
+                        var value = data.get("generationConcurrency");
+                        if (!value.isJsonPrimitive() || !value.getAsString().matches("[0-9]+")) {
+                            throw new Problem(400, "并发任务数须为非负整数，0 表示不限。");
+                        }
+                        concurrency = Integer.parseInt(value.getAsString());
+                    }
+                    studio.settings.save(field(data, "model", 100), field(data, "size", 20), replacement, remove, concurrency);
                     studio.images = studio.settings.images();
                     json(exchange, 200, Map.of("provider", studio.images.provider(), "model", studio.images.model()));
                 }
                 return;
             }
+        }
+        if (method.equals("POST") && path.equals("/api/decks/import")) {
+            var input = JsonParser.parseString(new String(read(exchange, 8 * 1024 * 1024), StandardCharsets.UTF_8));
+            if (!input.isJsonObject()) {
+                throw new Problem(400, "文稿须为 JSON 对象。");
+            }
+            created(exchange, new ProjectActions(studio).importDeck(input.getAsJsonObject()));
+            return;
         }
         if (path.equals("/api/decks")) {
             if (method.equals("GET")) {
@@ -202,6 +225,10 @@ public final class Main {
             }
             throw new Problem(404, "地址不存在。");
         }
+        if (method.equals("GET") && resource.equals("decks") && action.equals("cleanup")) {
+            json(exchange, 200, new ProjectActions(studio).previewCleanup(id));
+            return;
+        }
         if (method.equals("GET") && resource.equals("decks") && action.equals("costs")) {
             json(exchange, 200, studio.costs(id));
             return;
@@ -237,6 +264,14 @@ public final class Main {
         if (method.equals("POST") && resource.equals("decks")) {
             JsonObject data = body(exchange);
             switch (action) {
+                case "cleanup" -> {
+                    String token = null;
+                    if (data.has("token")) {
+                        token = optionalText(data, "token");
+                    }
+                    json(exchange, 200, new ProjectActions(studio).cleanup(id, token));
+                }
+                case "generate" -> json(exchange, 201, Map.of("jobs", new ProjectActions(studio).generateDeck(id, count(data))));
                 case "style" -> {
                     if (studio.db.execute("UPDATE decks SET style=? WHERE id=?", optionalText(data,"style"), id) == 0) {
                         throw new Problem(404, "演示稿不存在。");
@@ -294,7 +329,8 @@ public final class Main {
                 if (data.has("instruction")) {
                     instruction = optionalText(data, "instruction");
                 }
-                created(exchange, studio.enqueue(id, expectedRevision(data), optionalId(data, "parent"), instruction));
+                var jobs = new ProjectActions(studio).generate(id, expectedRevision(data), optionalId(data, "parent"), instruction, count(data));
+                json(exchange, 201, Map.of("id", jobs.getFirst(), "jobs", jobs));
             }
             case "retry" -> created(exchange, studio.retry(id, optionalId(data,"job")));
             case "board", "requirements" -> {
@@ -339,6 +375,17 @@ public final class Main {
             }
             default -> throw new Problem(404, "地址不存在。");
         }
+    }
+
+    private static int count(JsonObject data) {
+        if (!data.has("count")) {
+            return 1;
+        }
+        Long count = optionalId(data, "count");
+        if (count == null || count > 16) {
+            throw new Problem(400, "候选数量须为 1 到 16。");
+        }
+        return count.intValue();
     }
 
     private static Long expectedRevision(JsonObject data) {
@@ -470,6 +517,7 @@ public final class Main {
     private static void staticFile(HttpExchange exchange, String path) throws IOException {
         String resource = path;
         String type = switch (path) {
+            case "/import-example.json" -> "application/json";
             case "/" -> "text/html";
             case "/app.css" -> "text/css";
             case "/app.js", "/theme.js" -> "text/javascript";

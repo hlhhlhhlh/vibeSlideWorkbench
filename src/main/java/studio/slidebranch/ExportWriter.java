@@ -51,8 +51,11 @@ final class ExportWriter {
                 if ("image/jpeg".equals(row.get("mime_type"))) {
                     type = PictureType.JPEG;
                 }
-                var image = deck.addPicture(directory.resolve((String) row.get("storage_key")).toFile(), type);
-                deck.createSlide().createPicture(image).setAnchor(frame(row));
+                // POI 5.4.1 applies a 1 MB record limit to the File overload.
+                try (var input = Files.newInputStream(directory.resolve((String) row.get("storage_key")))) {
+                    var image = deck.addPicture(input, type);
+                    deck.createSlide().createPicture(image).setAnchor(frame(row));
+                }
             }
             deck.write(output);
         }
